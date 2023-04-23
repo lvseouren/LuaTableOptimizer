@@ -20,7 +20,8 @@ and loading speed.
 ```
 {
 	k11 = 1,
-	k12 = {
+	k12 =
+	{
 		k21 = 2,
 	}
 }
