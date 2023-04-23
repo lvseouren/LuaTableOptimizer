@@ -17,13 +17,13 @@ if arg and arg[0] then
 	end
 end
 Root = string.gsub( Root, '\\', '/' )
-local DatabaseRoot = Root.."/Assets/StreamingAssets/Database"
+local DatabaseRoot = Root.."/Assets/AssetBundles/Lua/configs/data"
 local LuaRoot = Root.."/Assets/StreamingAssets/LuaRoot"
 package.path = package.path..';'..DatabaseRoot..'/?.lua'..';'.. LuaRoot..'/?.lua'
 
 local EnableDatasetOptimize = true
 local EnableDefaultValueOptimize = true
-local EnableLocalization = true -- set to false to disable localization process
+local EnableLocalization = false -- set to false to disable localization process
 
 local Database = {}
 local CSV --= require "std.csv"
@@ -567,20 +567,34 @@ local function _SerializeTable( val, name, skipnewlines, campact, depth, tableRe
 		end
 	end
     if valt == "table" then
-        append( "{" ) append( ending )
+        append( "{" )
+		-- append( ending )
 		local array_part = {}
 		local count = 0
+		local isNeedEndingAtEnd = false
         for k, v in ipairs( val ) do
-			if type( v ) ~= "function" then
+			local typeName = type(v)
+			local notNumber = typeName ~= "number"
+			isNeedEndingAtEnd = isNeedEndingAtEnd or notNumber
+			if k == 1 and notNumber then
+				append(ending)
+			end
+			if typeName ~= "function" then
 				array_part[k] = true
 				if count > 0 then
 					append( "," )
-					append( ending )
+					if notNumber then
+						append( ending )
+					end
 				end
-				append( _SerializeTable( v, nil, skipnewlines, campact, depth + 1, tableRef ) )
+				append( _SerializeTable( v, nil, skipnewlines, campact or not notNumber, depth + 1, tableRef ) )
 				count = count + 1
 			end
         end
+		if #array_part == 0 then
+			isNeedEndingAtEnd = true
+			append(ending)
+		end
 		local sortedK = {}
 		for k, v in pairs( val ) do
 			if type( v ) ~= "function" then
@@ -599,10 +613,10 @@ local function _SerializeTable( val, name, skipnewlines, campact, depth, tableRe
 			append( _SerializeTable( v, k, skipnewlines, campact, depth + 1, tableRef ) )
 			count = count + 1
         end
-		if count >= 1 then
+		if count >= 1 and isNeedEndingAtEnd then
 			append( ending )
 		end
-		if not campact then
+		if not campact and isNeedEndingAtEnd then
 			append( string.rep( "\t", depth ) )
 		end
 		append( "}" )
@@ -783,6 +797,7 @@ local function LoadDataset( name )
 		_G["Database"] = {}
 		Database.loaded = {}
 	end
+	local fileName
 	local loader = function( name )
 		Database.loaded = Database.loaded or {}
 		local r = Database.loaded[name]
@@ -797,7 +812,7 @@ local function LoadDataset( name )
 		end
 
 		local curName = pname..".lua"
-		local fileName = DatabaseRoot.."/"..curName
+		fileName = DatabaseRoot.."/"..curName
 		local checkFileName = function( path, name )
 			path, _ = path:gsub( "/", "\\" )
 			local _name = string.lower( name )
@@ -839,6 +854,7 @@ local function LoadDataset( name )
 			os.execute( "pause" )
 		end
 		local rval = chunk()
+		-- print(rval.__name)
 		if rval.__name ~= nil then
 			os.execute( "pause table's key must not be '__name' which is the reserved keyword." )
 		end
@@ -846,7 +862,7 @@ local function LoadDataset( name )
 			os.execute( "pause table's key must not be '__sourcefile' which is the reserved keyword." )
 		end
 		rval.__name = name
-		rval.__sourcefile = fileName
+		-- rval.__sourcefile = fileName
 
 		local namespace = Database
 		local ns = split( pname, '/' )
@@ -865,7 +881,7 @@ local function LoadDataset( name )
 		Database.loaded[name] = rval
 		return rval
 	end
-	return loader( name )
+	return loader( name ), fileName
 end
 
 local function CheckNotAscii( v )
@@ -988,317 +1004,110 @@ local function UniquifyTable( t )
 	return t
 end
 
-local function OptimizeDataset( dataset )
-	local ids = {}
-	local names = {}
-	local idType = nil
-	-- choose cs data type
-	-- for all fields in a record
-	local typeNameTable = {}
-	for k, v in pairs( dataset ) do
-		local _sk = tostring( k )
-		if _sk ~= "__name" and _sk ~= "__sourcefile" then
-			if not idType then
-				idType = type( k )
-			end
-			if idType == type( k ) then
-				ids[ #ids + 1 ] = k
-			end
-		end
-	end
-	if EnableDefaultValueOptimize then
-		-- find bigest table to generate all fields
-		local majorItem = 1
-		local f = 0
-		for k, v in pairs( dataset ) do
-			if type( v ) == "table" then
-				local num = 0
-				for _, _ in pairs( v ) do
-					num = num + 1
-				end
-				if num > f then
-					f = num
-					majorItem = k
-				end
-			end
-		end
-		local v = dataset[ majorItem ]
+local DefaultValueTableSet = {}		--默认值表
+local DefaultValueCountDcit = {}	--默认值计数
+local DefaultValueCurrMaxCount = {}	--当前最大计数
+local DefaultValueCurrValue = {}	--默认值当前取值
+
+local function CreateDefaultValueSet(t, depth)
+	local isList = t[1]
+	for k, v in pairs( t ) do
 		if type( v ) == "table" then
-			for name, value in pairs( v ) do
-				local nt = type( name )
-				if nt == "string" and name == "id" then
-					print( "this table already has a field named 'id'" )
+			if not next(v) then
+				if not DefaultValueTableSet[depth] then
+					DefaultValueTableSet[depth] = {}
 				end
-				if nt == "string" then
-					names[ #names + 1 ] = name
-				end
-			end
-			table.sort( names, function( a, b ) return a:lower() < b:lower() end )
-			for i, field in ipairs( names ) do
-				-- for all record / row
-				for r, t in ipairs( ids ) do
-					local record = dataset[ t ]
-					if record[ field ] ~= nil then
-						local v = record[ field ]
-						local curType = GetValueTypeNameCS( v )
-						if not typeNameTable[ field ] then
-							typeNameTable[ field ] = curType
-						elseif typeNameTable[ field ] == "int" and curType == "float" then
-							-- overwrite int to float
-							typeNameTable[ field ] = curType
-						elseif curType == "table" then
-							-- overwrite to table
-							typeNameTable[ field ] = curType
-						end
-					end
-				end
-				-- patching miss fields with default values
-				local curType = typeNameTable[ field ]
-				for r, t in ipairs( ids ) do
-					local record = dataset[ t ]
-					local v = record[ field ]
-					if v == nil then
-						local ft = typeNameTable[ field ]
-						if ft == "string" then
-							v = ""
-						elseif ft == "number" or ft == "int" or ft == "float" then
-							v = 0
-						elseif ft == "table" then
-							v = {}
-						elseif ft == "bool" then
-							v = false
-						end
-						record[ field ] = v
-					end
-				end
-			end
-		end
-	end
-
-	ids = {}
-	idType = nil
-	UniquifyTables = {}
-	UniquifyTablesIds = {}
-	UniquifyTablesInvIds = {}
-	UniquifyTablesRefCounter = {}
-
-	local isIntegerKey = true
-	local overwrites = nil
-	OrderedForeach(
-		dataset,
-		function( k, v )
-			local _sk = tostring( k )
-			if _sk ~= "__name" and _sk ~= "__sourcefile" then
-				if not idType then
-					idType = type( k )
-				end
-				-- check type
-				if idType == type( k ) then
-					ids[ #ids + 1 ] = k
-					if idType == "number" then
-						if isIntegerKey then
-							isIntegerKey = k == floor( k )
-						end
-					end
-				end
-				if type( v ) == "table" then
-					overwrites = overwrites or {}
-					overwrites[ k ] = UniquifyTable( v )
-				end
-			end
-		end
-	)
-	if overwrites then
-		for k, v in pairs( overwrites ) do
-			dataset[ k ] = overwrites[ k ]
-		end
-	end
-	local returnVal = nil
-	if EnableDefaultValueOptimize then
-		local defaultValues = nil
-		for i, field in ipairs( names ) do
-			local curType = typeNameTable[ field ]
-			-- for all record/row
-			local defaultValueStat = {
-			}
-			for r, t in ipairs( ids ) do
-				local record = dataset[ t ]
-				local v = record[ field ]
-				if v ~= nil then
-					local vcount = defaultValueStat[ v ] or 0
-					defaultValueStat[ v ] = vcount + 1
-				else
-					assert( "default value missing!" )
-				end
-			end
-			-- find the mostest used as a default value
-			local max = -1
-			local defaultValue = nil
-			local _defaultValue = "{}"
-			local result = OrderedForeachByValue(
-				defaultValueStat,
-				function( value, count )
-					if count >= max then
-						if count > max then
-							max = count
-							defaultValue = value
-							_defaultValue = SerializeTable( defaultValue, true, true )
-						else
-							if curType == "table" then
-								local _value = SerializeTable( value, true, true )
-								if #_value > #_defaultValue then
-									defaultValue = value
-									_defaultValue = SerializeTable( defaultValue, true, true )
-								end
-							else
-								local _value = value
-								local _defaultValue = defaultValue
-								if type( value ) == 'boolean' then
-								  _value = value and 1 or 0
-								  _defaultValue = defaultValue and 1 or 0
-								end
-								if _value < _defaultValue then
-									defaultValue = value
-									_defaultValue = SerializeTable( defaultValue, true, true )
-								end
-							end
-						end
-					end
-				end
-			)
-			if not result then
-				error( string.format( "create default value for \"%s\" failed. please make sure all the value's types are the same.", field ) )
-			end
-			if defaultValue ~= nil then
-				defaultValues = defaultValues or {}
-				defaultValues[ field ] = defaultValue
-			end
-		end
-		returnVal = defaultValues
-	end
-
-	-- remove tables whose's ref is 1 and re-mapping id
-	local newid = 1
-	local newIds = {}
-	local newInvIds = {}
-
-	OrderedForeach(
-		UniquifyTablesIds,
-		function( id, hash )
-			local table = UniquifyTables[ hash ]
-			local refcount = UniquifyTablesRefCounter[ table ]
-			if refcount == 1 then
-				UniquifyTables[ hash ] = nil
+				t[k] = {}
+				DefaultValueTableSet[depth][k] = {}
 			else
-				newIds[ newid ] = hash
-				newInvIds[ table ] = newid
-				newid = newid + 1
+				CreateDefaultValueSet(v, depth + 1)
+			end
+		elseif depth > 1 and not isList then
+			DefaultValueCountDcit[depth] = DefaultValueCountDcit[depth] or {}
+			DefaultValueCountDcit[depth][v] = DefaultValueCountDcit[depth][v] or 0
+			DefaultValueCountDcit[depth][v] = DefaultValueCountDcit[depth][v] + 1
+
+			DefaultValueCurrMaxCount[depth]  = DefaultValueCurrMaxCount[depth] or {}
+			DefaultValueCurrMaxCount[depth][k]  = DefaultValueCurrMaxCount[depth][k] or 0
+			if DefaultValueCurrMaxCount[depth][k] < DefaultValueCountDcit[depth][v] then
+				DefaultValueCurrMaxCount[depth][k] = DefaultValueCountDcit[depth][v]
+				DefaultValueCurrValue[depth] = DefaultValueCurrValue[depth] or {}
+				DefaultValueCurrValue[depth][k] = v
 			end
 		end
-	)
-
-	UniquifyTablesIds = newIds
-	UniquifyTablesInvIds = newInvIds
-	return returnVal
-end
-
-local function ToUniqueTableRefName( id )
-	if id <= MaxLocalVariableNum then
-		return string.format( RefTableName.."_%d", id )
-	else
-		return string.format( RefTableName.."[%d]", id - MaxLocalVariableNum )
 	end
 end
 
-local function SaveDatasetToFile( dataset, tofile, tableRef, name )
+local function RegenarateDefaultValue()
+	for depth,data in pairs(DefaultValueCurrMaxCount) do
+		for k,count in pairs(data) do
+			if count > 15 then
+				if not DefaultValueTableSet[depth] then
+					DefaultValueTableSet[depth] = {}
+				end
+				local defaultValue = DefaultValueCurrValue[depth][k]
+				DefaultValueTableSet[depth][k] = defaultValue
+			end
+		end
+	end
+end
+
+local function ReplaceTableValueByDefaultValue(t, depth)
+	local defaultValueTable = DefaultValueTableSet[depth]
+	for k, v in pairs( t ) do
+		if type( v ) == "table" then
+			if next(v) then
+				ReplaceTableValueByDefaultValue(v, depth + 1)
+			else
+				t[k] = nil
+			end
+		else
+			if defaultValueTable and v == defaultValueTable[k] then
+				t[k] = nil
+			end
+		end
+	end
+	-- local base = { __index = defaultValueTable, __newindex = function() error( "Attempt to modify read-only table" ) end }
+	-- setmetatable( t, base )
+	-- base.__metatable = false
+end
+
+local function OptimizeDataset( dataset )
+	if EnableDefaultValueOptimize then
+		dataset.__name = nil
+		CreateDefaultValueSet(dataset, 1)
+		RegenarateDefaultValue()
+		ReplaceTableValueByDefaultValue(dataset, 1)
+	end
+end
+
+local function SaveDatasetToFile( dataset, tofile, name, path )
 	if tofile then
-		outFile = CreateFileWriter( dataset.__sourcefile, "w" )
+		outFile = CreateFileWriter( path, "w" )
 	else
 		outFile = CreateFileWriter()
 	end
-	local ptr2ref = nil
-	if tableRef and tableRef.ptr2ref then
-		ptr2ref = tableRef.ptr2ref
-	end
-	if tableRef and tableRef.name2value then
-		local name2table = tableRef.name2value
-		local tables = tableRef.tables
-		local tableIds = tableRef.tableIds
-		local ptr2ref = tableRef.ptr2ref
-		local refcounter = tableRef.refcounter
-		local maxLocalVariableNum = tableRef.maxLocalVariableNum or MaxLocalVariableNum
-		local refTableName = tableRef.refTableName or "__rt"
-		local tableNum = #tableIds
-		for id, hash in ipairs( tableIds ) do
-			local table = tables[ hash ]
-			if table and id <= maxLocalVariableNum then
-				local refname = ptr2ref[ table ]
-				-- temp comment out top level ref
-				ptr2ref[ table ] = nil
-				local refcount = refcounter[ table ]
-				outFile.write(
-					string.format(
-						"%slocal %s = %s\n",
-						PrintTableRefCount and string.format( "--ref:%d\n", refcount ) or "",
-						refname,
-						SerializeTable( table, false, false, ptr2ref )
-					)
-				)
-				ptr2ref[ table ] = refname
-			else
-				break
-			end
-		end
-		if tableNum > maxLocalVariableNum then
-			local maxCount = tableNum - maxLocalVariableNum
-			outFile.write( string.format( "local %s = createtable and createtable( %d, 0 ) or {}\n", refTableName, maxCount ) )
-			for id = maxLocalVariableNum + 1, tableNum do
-				local offset = id - maxLocalVariableNum
-				local hash = tableIds[ id ]
-				local table = tables[ hash ]
-				local refname = ptr2ref[ table ]
-				-- temp comment out top level ref
-				ptr2ref[ table ] = nil
-				local refcount = refcounter[ table ]
-				outFile.write(
-					string.format(
-						"%s%s[%d] = %s\n",
-						PrintTableRefCount and string.format( "-- %s, ref:%d\n", refname, refcount ) or "",
-						refTableName, offset,
-						SerializeTable( table, false, false, ptr2ref )
-					)
-				)
-				ptr2ref[ table ] = refname
-			end
-		end
-	end
+	local title = string.format("---\n--- Auto generated by Config2TableProvider\n--- Do not modify the data below directly.\n---\n\n")
+	outFile.write(title)
 	local datasetName = dataset.__name or name
 	if not datasetName then
 		datasetName = UnknownName
 		dataset.__name = datasetName
 	end
+
 	outFile.write( string.format( "local %s = \n", datasetName ) )
-
-	-- remove none table value
-	local removed = nil
-	for k, v in pairs( dataset ) do
-		if type( v ) ~= "table" then
-			removed = removed or {}
-			removed[ #removed + 1 ] = k
-		end
-	end
-	if removed then
-		for _, k in ipairs( removed ) do
-			dataset[ k ] = nil
-		end
-	end
-
-	outFile.write( SerializeTable( dataset, false, false, ptr2ref ) )
+	outFile.write( SerializeTable( dataset, false, false ) )
 	outFile.write( "\n" )
-	if tableRef and tableRef.postOutput then
-		tableRef.postOutput( outFile )
+
+	if DefaultValueTableSet then
+		outFile.write("local df = {[1] = {}}\n")
+		for k, v in pairs(DefaultValueTableSet) do
+			outFile.write(string.format("df[%s] = %s\n", k,SerializeTable( v, false, false )))
+		end
+		outFile.write(string.format('pg.load("configs").bindDefaultValue(%s, df, 1)\n', datasetName))
 	end
-	outFile.write( string.format( "\nreturn %s\n", datasetName ) )
+	outFile.write(string.format('pg.load("configs").register("%s", %s)', datasetName, datasetName))
+	-- outFile.write( string.format( "\nreturn %s\n", datasetName ) )
 	outFile.close()
 end
 
@@ -1308,106 +1117,10 @@ local function ExportOptimizedDataset( t, StringBank )
 		datasetName = UnknownName
 		t.__name = datasetName
 	end
-	local localized = false
-	local genCode = false
-    if EnableLocalization then
-        OrderedForeach(
-            t,
-            function( id, _record )
-                if type( _record ) == "table" then
-                    localized = LocalizeRecord( id, _record, genCode, StringBank ) or localized
-                end
-            end
-        )
-    end
-	local tableRef = nil
-	local defaultValues = nil
 	if EnableDatasetOptimize then
-		defaultValues = OptimizeDataset( t )
-		if defaultValues then
-			local removeDefaultValues = function( record )
-				local removes = nil
-				local adds = nil
-				for field, defaultVal in pairs( defaultValues ) do
-					local value = record[ field ]
-					local hasValue = true
-					if value == nil then
-						assert( false, "OptimizeDataset should patch all missing fields!" )
-						hasValue = false
-					end
-					if value == defaultVal and hasValue then
-						removes = removes or {}
-						removes[ #removes + 1 ] = field
-					else
-						adds = adds or {}
-						adds[ field ] = value
-					end
-				end
-				-- remove fields with default value
-				if removes then
-					for _, f in ipairs( removes ) do
-						record[ f ] = nil
-					end
-				end
-				-- patch fields with none-default value
-				if adds then
-					for f, v in pairs( adds ) do
-						record[ f ] = v
-					end
-				end
-			end
-			local removed = {}
-			for _, record in pairs( t ) do
-				if type( record ) == "table" then
-					if not removed[ record ] then
-						removeDefaultValues( record )
-						removed[ record ] = true
-					end
-				end
-			end
-		end
-		local reftables = nil
-		local ptr2ref = nil
-		-- create ref table: table -> refname
-		for _, hash in pairs( UniquifyTablesIds ) do
-			local t = UniquifyTables[ hash ]
-			if t then
-				local refName = ToUniqueTableRefName( UniquifyTablesInvIds[ t ] )
-				reftables = reftables or {}
-				ptr2ref = ptr2ref or {}
-				reftables[ refName ] = t
-				ptr2ref[ t ] = refName
-			end
-		end
-		tableRef = {
-			name2value = reftables,
-			tables = UniquifyTables, -- hash -> table
-			tableIds = UniquifyTablesIds, -- id -> hash
-			ptr2ref = ptr2ref, -- table -> refname
-			refcounter = UniquifyTablesRefCounter, -- table -> refcount
-			maxLocalVariableNum = MaxLocalVariableNum,
-			refTableName = RefTableName,
-			postOutput = function( outFile )
-				if defaultValues then
-					outFile.write(
-						string.format(
-							"local %s = %s\n",
-							DefaultValueTableName,
-							SerializeTable( defaultValues, false, false, ptr2ref )
-						)
-					)
-					outFile.write( "do\n" )
-					outFile.write( string.format( "\tlocal base = { __index = %s, __newindex = function() error( \"Attempt to modify read-only table\" ) end }\n", DefaultValueTableName ) )
-					outFile.write( string.format( "\tfor k, v in pairs( %s ) do\n", datasetName ) )
-					outFile.write( "\t\tsetmetatable( v, base )\n" )
-					outFile.write( "\tend\n" )
-					outFile.write( "\tbase.__metatable = false\n" )
-					outFile.write( "end\n" )
-				end
-			end
-		}
+		OptimizeDataset( t )
+		return t
 	end
-	return t, tableRef, localized
 end
 
 --tofile: not output to file, just for debug
@@ -1429,10 +1142,9 @@ local function ExportDatabaseLocalText( tofile, newStringBank )
 			local t = Database[ v ]
 			local localized = false
 			if t then
-				local _t, tableRef, localized = ExportOptimizedDataset( t, StringBank )
+				local _t= ExportOptimizedDataset( t, StringBank )
 				assert( _t == t )
-				localized_dirty = localized_dirty or localized
-				SaveDatasetToFile( Database[ v ], tofile, tableRef )
+				SaveDatasetToFile( Database[ v ], tofile )
 			end
 		end
 	end
@@ -1445,78 +1157,31 @@ local function ExportDatabaseLocalText( tofile, newStringBank )
 	print( "Database Exporting LocaleText done." )
 end
 
---[[
-local test = {
-	{
-		1,
-		2,
-		3,
-		a = "123",
-		b = "123"
-	},
-	{
-		1,
-		2,
-		3,
-		a = "123",
-		b = "123"
-	},
-	{
-		1,
-		2,
-		5,
-		a = "123",
-		b = "123"
-	},
-	[9] = {
-		1,
-		2,
-		5,
-		a = "123",
-		b = "123"
-	},
-	[100] = {
-		1,
-		2,
-		3,
-		a = "tttt",
-		b = "123"
-	},
-	[11] = {
-		1,
-		2,
-		3,
-		a = "123",
-		b = "123",
-		c = { {1}, {1}, {2}, {2} },
-		d = { { a = 1, 1 }, { a = 2, 2 } },
-		e = { { a = 1, 1 }, { a = 2, 2 } },
-	}
-}
+local function OptimizeSpecificFile(fileName)
+	local StringBank = nil
+	if newStringBank then
+		StringBank = {}
+	else
+		StringBank = LoadStringBankFromCSV()
+	end
+	StringBank = StringBank or {}
+	if not ExcludedFiles[ fileName ] then
+		print( "LoadDataset :"..fileName )
+		local _, path = LoadDataset( fileName )
+		local t = Database[ fileName ]
+		if t then
+			local _t = ExportOptimizedDataset( t, StringBank )
+			assert( _t == t )
+			SaveDatasetToFile( Database[ fileName ], true, fileName, path)
+		end
+	end
+end
 
-EnableDefaultValueOptimize = false
-local _localizedText = {}
-local _src = SerializeTable( test )
-local _clone = DeserializeTable( _src )
-print( _src )
-local t, tableRef = ExportOptimizedDataset( test, _localizedText )
-assert( t == test )
---print( SerializeTable( t ) )
-SaveDatasetToFile( t, false, tableRef, "test" )
-local _dst = SerializeTable( t )
-print( _dst )
-assert( _src == _dst )
+local function test(param1, param2)
+	local ret = (string.format("传参调用测试：参数1：%s, 参数2：%s", param1, param2))
+	return ret
+end
 
-EnableDefaultValueOptimize = true
-_localizedText = {}
-t, tableRef = ExportOptimizedDataset( _clone, _localizedText )
-assert( t == _clone )
---_clone.__name = "__cloned_test"
-SaveDatasetToFile( _clone, false, tableRef )
-local _dst = SerializeTable( _clone )
-print( _dst )
-print( _src ~= _dst )
---]]
-
---ExportDatabaseLocalText( false )
-
+_G.ExportDatabaseLocalText = ExportDatabaseLocalText
+_G.Test = test
+_G.OptimizeSpecificFile = OptimizeSpecificFile
